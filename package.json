@@ -1,12 +1,12 @@
 {
   "name": "awen-lib",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "awen lib for nodejs programming",
   "main": "awenlib.js",
   "scripts": {
     "test": "echo \"TODO: no test yet\" && exit 0"
   },
-  "author": "wenghanyi, awen",
+  "author": "awen",
   "license": "MIT",
   "dependencies": {
     "async": "^1.5.1",
