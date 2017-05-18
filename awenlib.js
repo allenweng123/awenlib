@@ -1684,6 +1684,30 @@ var exObj = {
     flatten: flatten
 };
 
+function isTypeFactory(type) {
+    return function (target) {
+        return Object.prototype.toString.call(target) === '[object ' + type + ']';
+    };
+}
+
+// use json stringify & parse to do deep copy
+function deepCopy(a) {
+    if (typeof a === 'undefined') {
+        return;
+    }
+    return JSON.parse(JSON.stringify(a));
+}
+
+exports.ex = {
+    isObject: isTypeFactory('Object'),
+    isArray: isTypeFactory('Array'),
+    isNumber: isTypeFactory('Number'),
+    isString: isTypeFactory('String'),
+    isFunction: isTypeFactory('Function'),
+    
+    deepCopy: deepCopy
+}
+
 exports.exArray = exArray;
 exports.exMath = exMath;
 exports.exDate = exDate;
