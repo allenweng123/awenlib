@@ -1852,15 +1852,24 @@ exports.daoFactory = (function () {
         var commonColsMapping = {
             id: 'id',
             version: 'version',
-            create: 'gmtCreate',
-            update: 'gmtModified'
+            create: 'createTime',
+            update: 'updateTime'
         };
         exObj.copyProps(commColsOverride, commonColsMapping, true);       
 
-        var commonCols = {
-            number: [commonColsMapping.id, commonColsMapping.version],
-            string: [commonColsMapping.create, commonColsMapping.update]
-        };
+        var commonCols = {number: [], string: []};
+        if (commonColsMapping.id) {
+            commonCols.number.push(commonColsMapping.id);
+        }
+        if (commonColsMapping.version) {
+            commonCols.number.push(commonColsMapping.version);
+        }
+        if (commonColsMapping.create) {
+            commonCols.string.push(commonColsMapping.create);
+        }
+        if (commonColsMapping.update) {
+            commonCols.string.push(commonColsMapping.update);
+        }
 
         function commonColsWrap(entity, op, oldVersion) {
             if (!entity) {
@@ -1870,33 +1879,46 @@ exports.daoFactory = (function () {
             if (op === 'update' || op === 'insert') {
                 var now = exDate.format(new Date(), 'yyyy-MM-dd hh:mm:ss');
                 var nowEsc = MYSQL.escape(now);
-                entity[commonColsMapping.version] = 0;
-                entity[commonColsMapping.update] = now;
+                if (commonColsMapping.version) {
+                    entity[commonColsMapping.version] = 0;
+                }
+                if (commonColsMapping.update) {
+                    entity[commonColsMapping.update] = now;
+                }
 
                 if (op === 'update') {
                     if (oldVersion !== null && typeof oldVersion !== 'undefined' 
-                            && Object.prototype.toString.call(oldVersion) === '[object Number]') {
+                            && Object.prototype.toString.call(oldVersion) === '[object Number]' && commonColsMapping.version) {
                         entity[commonColsMapping.version] = oldVersion + 1;
                     }
-                    return [
-                        MYSQL.escapeId(toUnderLine(commonColsMapping.version)) + '=' + entity[commonColsMapping.version],
-                        MYSQL.escapeId(toUnderLine(commonColsMapping.update)) + '=' + nowEsc
-                    ];
+                    var updateStatements = [];
+                    if (commonColsMapping.version) {
+                        updateStatements.push(MYSQL.escapeId(toUnderLine(commonColsMapping.version)) + '=' + entity[commonColsMapping.version]);
+                    }
+                    if (commonColsMapping.update) {
+                        updateStatements.push(MYSQL.escapeId(toUnderLine(commonColsMapping.update)) + '=' + nowEsc);
+                    }
+                    return updateStatements;
                 }
                 else if (op === 'insert') {
-                    entity[commonColsMapping.create] = now;
-                    return [
-                        [
-                            MYSQL.escapeId(toUnderLine(commonColsMapping.version)), 
-                            MYSQL.escapeId(toUnderLine(commonColsMapping.create)), 
-                            MYSQL.escapeId(toUnderLine(commonColsMapping.update))
-                        ],
-                        [
-                            entity[commonColsMapping.version], 
-                            nowEsc, 
-                            nowEsc
-                        ]
-                    ];
+                    if (commonColsMapping.create) {
+                        entity[commonColsMapping.create] = now;
+                    }
+                    var insertCols = [];
+                    var insertValues = [];
+                    if (commonColsMapping.version) {
+                        insertCols.push(MYSQL.escapeId(toUnderLine(commonColsMapping.version)));
+                        insertValues.push(entity[commonColsMapping.version]);
+                    }
+                    if (commonColsMapping.create) {
+                        insertCols.push(MYSQL.escapeId(toUnderLine(commonColsMapping.create)));
+                        insertValues.push(nowEsc);
+                    }
+                    if (commonColsMapping.update) {
+                        insertCols.push(MYSQL.escapeId(toUnderLine(commonColsMapping.update)));
+                        insertValues.push(nowEsc);
+                    }
+                    return [insertCols, insertValues];
                 }
             }
             return null;
@@ -1924,7 +1946,8 @@ exports.daoFactory = (function () {
                 }
                 else {
                     var criteria = {};
-                    criteria[commonColsMapping.id] = id;
+                    var primaryKey = commonColsMapping.id ? commonColsMapping.id : 'id';
+                    criteria[primaryKey] = id;
                     var entity = null;
                     this.getEntityByCriteria(criteria, function (en) {
                         // this is to get by id, should only be one row !
@@ -2061,7 +2084,8 @@ exports.daoFactory = (function () {
                                             });
                                         }
                                         else if (typeof processRow === 'string' && /map/i.test(processRow)) {
-                                            allEntitys[entity[commonColsMapping.id]] = entity;
+                                            var primaryKey = commonColsMapping.id ? commonColsMapping.id : 'id';
+                                            allEntitys[entity[primaryKey]] = entity;
                                         }
                                         else {
                                             allEntitys.push(entity);
@@ -2110,7 +2134,8 @@ exports.daoFactory = (function () {
                     }
                 });
                 if (len > 0) {
-                    me.getEntityById(entity[commonColsMapping.id], function (err, oldEntity) {
+                    var primaryKey = commonColsMapping.id ? commonColsMapping.id : 'id';
+                    me.getEntityById(entity[primaryKey], function (err, oldEntity) {
                         if (err) {
                             cb(err);
                         }
@@ -2136,8 +2161,8 @@ exports.daoFactory = (function () {
                                 }
                                 // update 
                                 if (needToUpdate) {
-                                    var update = 'UPDATE ' + name + ' SET ' + cv.concat(commonColsWrap(entity, 'update', oldEntity[commonColsMapping.version])).join(',') 
-                                            + ' WHERE ' + MYSQL.escapeId(toUnderLine(commonColsMapping.id)) + ' = ' + MYSQL.escape(entity[commonColsMapping.id]);
+                                    var update = 'UPDATE ' + name + ' SET ' + cv.concat(commonColsWrap(entity, 'update', commonColsMapping.version ? oldEntity[commonColsMapping.version] : null)).join(',') 
+                                            + ' WHERE ' + MYSQL.escapeId(toUnderLine(primaryKey)) + ' = ' + MYSQL.escape(entity[primaryKey]);
                                     logger.debug('[' + name + '] saveEntity, update = ' + update);
                                     pool.query(update, function (err, result) {
                                         if (err) {
@@ -2176,7 +2201,7 @@ exports.daoFactory = (function () {
                                         if (result.affectedRows !== 1) {
                                             logger.warn('insert 1 row, but return ' + result.affectedRows + ' rows !');
                                         }
-                                        entity[commonColsMapping.id] = result.insertId;
+                                        entity[primaryKey] = result.insertId;
                                         // TODO: verion, gmt_ still lost
                                         cb(null, entity);
                                     }
