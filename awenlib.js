@@ -172,7 +172,6 @@ function isInternalStop(err) {
 var mainFlow = function () {
     var steps = [];
     var options = {};
-    var webResponse = null;
     var retry = 0;
     Array.prototype.forEach.call(arguments, function(item) {
         if (typeof item === 'function') {
@@ -1698,12 +1697,16 @@ function deepCopy(a) {
     return JSON.parse(JSON.stringify(a));
 }
 
-exports.ex = {
+var ex = {
     isObject: isTypeFactory('Object'),
     isArray: isTypeFactory('Array'),
     isNumber: isTypeFactory('Number'),
     isString: isTypeFactory('String'),
     isFunction: isTypeFactory('Function'),
+
+    isValid: function (v) {
+        return typeof v !== 'undefined' && v !== null;
+    },
     
     deepCopy: deepCopy
 }
@@ -1712,7 +1715,7 @@ exports.exArray = exArray;
 exports.exMath = exMath;
 exports.exDate = exDate;
 exports.exObj = exObj;
-
+exports.ex = ex;
 
 // ----------------
 // misc tools
@@ -1955,6 +1958,21 @@ exports.daoFactory = (function () {
         var u2cFields = {};
         fieldsSetup(defs, u2cFields);
 
+        function criteriaValue(key, value) {
+            var c = {};
+            c[key] = value;
+            var defaultCr = MYSQL.escape(c);
+
+            if (ex.isArray(value) && value.length > 0) {
+                return MYSQL.escapeId(key) + ' IN (' + value.map(function (va) { return MYSQL.escape(va); }).join(',') + ')';
+            }
+            else if (ex.isString(value) && /^LIKE /) {
+                return MYSQL.escapeId(key) + ' LIKE ' + MYSQL.escape(value.replace(/^LIKE /, ''));
+            }
+
+            return defaultCr;
+        }
+
         return {
             createEmptyEntity: function () {
                 var entity = {};
@@ -2009,6 +2027,21 @@ exports.daoFactory = (function () {
              *     row 4 <------------------------/      
              */
             // TODO: to support tables join select !
+            /*
+             * criteria: {
+             *    columnCamel-A: 'abc',
+             *    columnCamel-B: 100,
+             *    columnCamel-C: [1,2,3,4]  // trans to in
+             *    colunmCamel-D: 'LIKE xxx' // trans to like
+             *    colunmCamel-F: {
+             *        distinct: true,   // default false
+             *        orderBy: 'desc'     // desc/asc
+             *        value: [1,2,3,4]  // just like colunmCamel-[A,B,C,D]
+             *    }
+             *    __LIMIT__: 100
+             * }
+             *
+             */
             getEntityByCriteria: function () {
                 var args = Array.prototype.slice.call(arguments, 0);
                 var cb = args.pop();
@@ -2016,113 +2049,146 @@ exports.daoFactory = (function () {
                 var processRow = args.shift();
                 var parallSize = args.shift() || 0;
 
+                var criteriaArr = [];
+                var orderByArr = [];
+                var distinctCol = '';
+                var limit = 10000;
+                exObj.each(criteria, function (v, k) {
+                    if (k === '__LIMIT__' && ex.isNumber(v)) {
+                        limit = v;
+                        return;
+                    }
+
+                    var key = toUnderLine(k);
+                    var cr = null;
+
+                    if (ex.isObject(v)) {
+                        if (ex.isValid(v.value)) {
+                            cr = criteriaValue(key, v.value);   
+                        }
+
+                        if (v.distinct) {
+                            distinctCol = name + '.' + key;
+                        }
+
+                        if (v.orderBy === 'desc') {
+                            orderByArr.push(MYSQL.escapeId(key) + ' DESC ');
+                        }
+                        else if (v.orderBy === 'asc') {
+                            orderByArr.push(MYSQL.escapeId(key) + ' ASC ');
+                        }
+                    }
+                    else {
+                        cr = criteriaValue(key, v);
+                    }
+
+                    if (cr) {
+                        criteriaArr.push(cr);
+                    }
+                });
+
                 var cols = Object.keys(u2cAllFields).map(function (u) {
                     return name + '.' + u;
                 }).join(',');
-                var criteriaArr = [];
-                exObj.each(criteria, function (v, k) {
-                    var c = {};
-                    c[toUnderLine(k)] = v;
-                    criteriaArr.push(MYSQL.escape(c));
-                });
-                var ops = null;
+                
+                if (distinctCol) {
+                    cols = 'DISTINCT ' + distinctCol + ', ' + cols;
+                }
+
+                var ops = {
+                    sql: 'SELECT ' + cols + ' FROM ' + name,
+                    nestTables: '.'
+                };
+
                 if (criteriaArr.length > 0) {
-                    ops = {
-                        sql: 'SELECT ' + cols + ' FROM ' + name + ' WHERE ' + criteriaArr.join(' AND '),
-                        nestTables: '.'
-                    };
-                }
-                else {
-                    ops = {
-                        sql: 'SELECT ' + cols + ' FROM ' + name + ' LIMIT 10000',
-                        nestTables: '.'
-                    };
+                    ops.sql += ' WHERE ' + criteriaArr.join(' AND ');
                 }
 
-                if (!ops) {
-                    cb(null, null);
+                if (orderByArr.length > 0) {
+                    ops.sql += ' ORDER BY ' + orderByArr.join(' , ');
                 }
-                else {
-                    var me = this;
-                    logger.debug('[' + name + '] getEntityByCriteria, select ops = ' + JSON.stringify(ops));
-                    pool.getConnection(function(err, connection) {
-                        if (err) {
-                            logger.warn(err);
-                            cb(err);
+
+                ops.sql += ' LIMIT ' + limit;
+
+                var me = this;
+                logger.debug('[' + name + '] getEntityByCriteria, select ops = ' + JSON.stringify(ops));
+                pool.getConnection(function(err, connection) {
+                    if (err) {
+                        logger.warn(err);
+                        cb(err);
+                    }
+                    else {
+                        var rowCount = 0;
+                        var doneCount = 0;
+                        var allEntitys = [];
+                        if (typeof processRow === 'string' && /map/i.test(processRow)) {
+                            allEntitys = {};
                         }
-                        else {
-                            var rowCount = 0;
-                            var doneCount = 0;
-                            var allEntitys = [];
-                            if (typeof processRow === 'string' && /map/i.test(processRow)) {
-                                allEntitys = {};
-                            }
-                            connection.query(ops)
-                                .on('error', function (err) {
-                                    logger.warn(err);
-                                    cb(err);
-                                })
-                                .on('result', function (row) {
-                                    logger.debug('[' + name + '] getEntityByCriteria, row = ' + JSON.stringify(row));
-                                    var valid = false;
-                                    var entity = me.createEmptyEntity();
-                                    exObj.each(row, function (value, prop) {
-                                        var m = prop.match(regexp);
-                                        if (m && m.length === 2) {
-                                            var col = m[1];
-                                            if (u2cAllFields.hasOwnProperty(col)) {
-                                                var item = u2cAllFields[col];
-                                                entity[item.c] = db2JsByType(value, item.t);
-                                                valid = true;
-                                            }
-                                        }
-                                    });
-                                    if (valid) {
-                                        if (typeof processRow === 'function') {
-                                            rowCount++;
-                                            if (rowCount === parallSize) {
-                                                rowCount = 0;
-                                                connection.pause();
-                                            }
-
-                                            /*
-                                             * // connection timeout is mysqlTimeout, so give processRow at most mysqlTimeout/2 to do its job no matter whether it is sync or async
-                                             * var timer = setTimeout(function () {
-                                             *     connection.resume();
-                                             * }, mysqlTimeout/2);
-                                             * var resumeWrap = function () {
-                                             *     if (timer) {
-                                             *         clearTimeout(timer);
-                                             *         timer = null;
-                                             *         connection.resume();
-                                             *     }
-                                             * };
-                                             */
-                                            
-                                            processRow(entity, function () {
-                                                doneCount++;
-                                                if (doneCount === parallSize) {
-                                                    doneCount = 0;
-                                                    connection.resume();
-                                                }
-                                            });
-                                        }
-                                        else if (typeof processRow === 'string' && /map/i.test(processRow)) {
-                                            var primaryKey = commonColsMapping.id ? commonColsMapping.id : 'id';
-                                            allEntitys[entity[primaryKey]] = entity;
-                                        }
-                                        else {
-                                            allEntitys.push(entity);
+                        connection.query(ops)
+                            .on('error', function (err) {
+                                logger.warn(err);
+                                cb(err);
+                            })
+                            .on('result', function (row) {
+                                logger.debug('[' + name + '] getEntityByCriteria, row = ' + JSON.stringify(row));
+                                var valid = false;
+                                var entity = me.createEmptyEntity();
+                                exObj.each(row, function (value, prop) {
+                                    var m = prop.match(regexp);
+                                    if (m && m.length === 2) {
+                                        var col = m[1];
+                                        if (u2cAllFields.hasOwnProperty(col)) {
+                                            var item = u2cAllFields[col];
+                                            entity[item.c] = db2JsByType(value, item.t);
+                                            valid = true;
                                         }
                                     }
-                                })
-                                .on('end', function () {
-                                    connection.release();
-                                    cb(null, allEntitys);
                                 });
-                        }
-                    });
-                }
+                                if (valid) {
+                                    if (typeof processRow === 'function') {
+                                        rowCount++;
+                                        if (rowCount === parallSize) {
+                                            rowCount = 0;
+                                            connection.pause();
+                                        }
+
+                                        /*
+                                         * // connection timeout is mysqlTimeout, so give processRow at most mysqlTimeout/2 to do its job no matter whether it is sync or async
+                                         * var timer = setTimeout(function () {
+                                         *     connection.resume();
+                                         * }, mysqlTimeout/2);
+                                         * var resumeWrap = function () {
+                                         *     if (timer) {
+                                         *         clearTimeout(timer);
+                                         *         timer = null;
+                                         *         connection.resume();
+                                         *     }
+                                         * };
+                                         */
+                                        
+                                        processRow(entity, function () {
+                                            doneCount++;
+                                            if (doneCount === parallSize) {
+                                                doneCount = 0;
+                                                connection.resume();
+                                            }
+                                        });
+                                    }
+                                    else if (typeof processRow === 'string' && /map/i.test(processRow)) {
+                                        var primaryKey = commonColsMapping.id ? commonColsMapping.id : 'id';
+                                        allEntitys[entity[primaryKey]] = entity;
+                                    }
+                                    else {
+                                        allEntitys.push(entity);
+                                    }
+                                }
+                            })
+                            .on('end', function () {
+                                connection.release();
+                                cb(null, allEntitys);
+                            });
+                    }
+                });
             },
 
             // TODO: to support batch entitys save action !
@@ -2737,6 +2803,7 @@ exports.expressLogger = function (level) {
         // all customized obj assign to 'awen'
         if (!req.awen) {
             req.awen = {};
+            req.awen.data = {}; // to restore internal data
         }
         if (!res.awen) {
             res.awen = {};
