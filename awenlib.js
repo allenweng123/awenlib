@@ -679,7 +679,7 @@ exports.conditionalContinue = conditionalContinue;
 var wrapInfo = function(name, fn) {
     return function() {
         logger.info('[' + name + ']'+ ': ' + JSON.stringify(Array.prototype.slice.call(arguments, 0, arguments.length - 1)));
-        fn.apply(this, arguments);
+        return fn.apply(this, arguments);
     };
 };
 
@@ -788,12 +788,22 @@ var exe = wrapInfo('exe', function () {
 });
 
 var req = wrapInfo('req', function (op, cb) {
-    REQ(op, function (err, resp, body) {
-        if (resp.statusCode !== 200) {
-            cb('response code is not 200, act[' + resp.statusCode + ']');
+    var logHead = '[req-' + tools.genRandomPattern(6) + ']: ';
+    var start = new Date();
+    logger.info(logHead + 'req go');
+    return REQ(op, function (err, resp, body) {
+        if (err) {
+            cb(err);
         }
         else {
-            cb(null, body);
+            if (resp.statusCode !== 200) {
+                cb('response code is not 200, act[' + resp.statusCode + ']');
+            }
+            else {
+                var end = new Date();
+                logger.info(logHead + 'resp back, ' + (end.getTime() - start.getTime()) + 'ms');
+                cb(null, body);
+            }
         }
     });
 });
@@ -2822,7 +2832,10 @@ exports.expressLogger = function (level) {
         res.awen.logger = req.awen.logger;
         req.awen.recordTimeResult = [];
         
-        var start = null;
+        // var start = null;
+        // TODO: if req.on('end') never in, then exception will comes out inside res.on('finish')
+        var start = new Date();
+
         var remote = req.ip;
         var method = req.method;
         var urlObj = URL.parse(req.url, true);
